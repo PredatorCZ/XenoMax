@@ -1,0 +1,3 @@
+[submodule "3rd_party/xenolib"]
+	path = 3rd_party/xenolib
+	url = https://github.com/PredatorCZ/XenoLib.git
