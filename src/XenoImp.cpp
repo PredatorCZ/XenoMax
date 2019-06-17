@@ -69,8 +69,10 @@ public:
 	void LoadSkeleton(BCSKEL *skel);
 	void LoadAnimation(BCANIM *anim);
 	void LoadModels(MXMD *model);
-	void LoadTextures(MXMD *model);
+	INodeTab LoadMeshes(MXMD *model, MXMDModel::Ptr &mdl, int curGroup);
+	int LoadTextures(MXMD *model);
 	void LoadMaterials(MXMD *model);
+	int LoadInstances(MXMD *model);
 	void LoadModelPose(MXMDModel::Ptr &model);
 	void ApplySkin(MXMDGeomBuffers::Ptr &buff, MXMDMeshObject::Ptr &mesh, INodeSuffixer &nde, Face *mfac, MXMDVertexDescriptor *skinDesc);
 	void ApplyMorph(MXMDMorphTargets::Ptr &morphs, INode *node, Mesh *mesh, MXMDMeshObject::Ptr &msh, MXMDModel::Ptr &mdl, MXMDGeomBuffers::Ptr &buff);
@@ -334,24 +336,63 @@ void XenoImp::LoadAnimation(BCANIM *anim)
 
 }
 
-void XenoImp::LoadTextures(MXMD *model)
+int XenoImp::LoadTextures(MXMD *model)
 {
 	MXMDTextures::Ptr textures = model->GetTextures();
+	MXMDExternalTextures::Ptr exTextures = model->GetExternalTextures();
 
-	if (!textures)
-		return;
-
-	const int numTextures = textures->GetNumTextures();
-
-	for (int t = 0; t < numTextures; t++)
+	if (textures)
 	{
-		const char *_texName = textures->GetTextureName(t);
-		TSTRING texName = esStringConvert<TCHAR>(_texName);
+		const int numTextures = textures->GetNumTextures();
 
-		BitmapTex *maxBitmap = NewDefaultBitmapTex();
-		maxBitmap->SetName(texName.c_str());
-		texmaps.push_back(maxBitmap);
+		for (int t = 0; t < numTextures; t++)
+		{
+			const char *_texName = textures->GetTextureName(t);
+			TSTRING texName = esStringConvert<TCHAR>(_texName);
+
+			BitmapTex *maxBitmap = NewDefaultBitmapTex();
+			maxBitmap->SetName(texName.c_str());
+			texmaps.push_back(maxBitmap);
+		}
+
+		return 0;
 	}
+
+	if (exTextures)
+	{
+		const int numTextures = exTextures->GetNumTextures();
+
+		for (int t = 0; t < numTextures; t++)
+		{
+			const int containerID = exTextures->GetContainerID(t);
+			const int textureID = exTextures->GetExTextureID(t);
+
+			TSTRING texName;
+
+			if (containerID > -1)
+			{
+				texName.append(ToTSTRING(containerID));
+				texName.push_back('/');
+			}
+
+			if (textureID < 1000)
+				texName.push_back('0');
+			if (textureID < 100)
+				texName.push_back('0');
+			if (textureID < 10)
+				texName.push_back('0');
+
+			texName.append(ToTSTRING(textureID));
+
+			BitmapTex *maxBitmap = NewDefaultBitmapTex();
+			maxBitmap->SetName(texName.c_str());
+			texmaps.push_back(maxBitmap);
+		}
+
+		return 1;
+	}
+
+	return -1;
 }
 
 void XenoImp::LoadMaterials(MXMD *model)
@@ -456,58 +497,149 @@ void XenoImp::LoadMaterials(MXMD *model)
 	}
 }
 
-void XenoImp::LoadModels(MXMD *model)
+INodeTab XenoImp::LoadMeshes(MXMD *model, MXMDModel::Ptr &mdl, int curGroup)
 {
-	MXMDModel::Ptr mdl = model->GetModel();
-	MXMDGeomBuffers::Ptr geom = model->GetGeometry();
-
-	if (!mdl || !geom)
-		return;
-
-	LoadModelPose(mdl);
-
-	int currentAssembly = 0;
 	ILayerManager *manager = GetCOREInterface13()->GetLayerManager();
 	TSTRING assName(_T("Group"));
+	INodeTab outNodes;
+	MXMDGeomBuffers::Ptr geom = model->GetGeometry(curGroup);
 
-	const int numMeshGroups = mdl->GetNumMeshGroups();
+	if (!geom)
+		return {};
 
-	for (int g = 0; g < numMeshGroups; g++)
+	MXMDMeshGroup::Ptr group = mdl->GetMeshGroup(curGroup);
+
+	MSTR curAssName = assName.c_str();
+	curAssName.append(ToTSTRING(curGroup).c_str());
+
+	ILayer *currLayer = manager->GetLayer(curAssName);
+
+	if (!currLayer)
+		currLayer = manager->CreateLayer(curAssName);
+
+	int currentMesh = 0;
+	const int numMeshes = group->GetNumMeshObjects();
+	outNodes.Resize(numMeshes);
+
+	for (int m = 0; m < numMeshes; m++)
 	{
-		MXMDMeshGroup::Ptr group = mdl->GetMeshGroup(g);
+		MXMDMeshObject::Ptr mObj = group->GetMeshObject(m);
 
-		MSTR curAssName = assName.c_str();
-		curAssName.append(ToTSTRING(currentAssembly).c_str());
-		
-		ILayer *currLayer = manager->GetLayer(curAssName);
+		const int meshFacesID = mObj->GetUVFacesID();
+		MXMDFaceBuffer::Ptr fBuffer = geom->GetFaceBuffer(meshFacesID);
+		MXMDVertexBuffer::Ptr vBuffer = geom->GetVertexBuffer(mObj->GetBufferID());
+		const int numVerts = vBuffer->NumVertices();
+		const int numFaces = fBuffer->GetNumIndices() / 3;
+		TriObject *obj = CreateNewTriObject();
+		Mesh *msh = &obj->GetMesh();
+		msh->setNumVerts(numVerts);
+		msh->setNumFaces(numFaces);
 
-		if (!currLayer)
-			currLayer = manager->CreateLayer(curAssName);
+		const USVector *fBuff = fBuffer->GetBuffer();
+		MXMDVertexBuffer::DescriptorCollection descs = vBuffer->GetDescriptors();
+		INodeSuffixer suff;
+		int currentMap = 1;
+		MXMDVertexDescriptor *skinDesc = nullptr;
 
-		int currentMesh = 0;
-		const int numMeshes = group->GetNumMeshObjects();
+		for (auto &d : descs)
+			switch (d->Type())
+			{
+			case MXMD_POSITION:
+			{
+				for (int v = 0; v < numVerts; v++)
+				{
+					Point3 temp;
+					d->Evaluate(v, &temp);
+					temp *= IDC_EDIT_SCALE_value;
+					msh->setVert(v, corMat.VectorTransform(temp));
+				}
+				break;
+			}
+			case MXMD_UV1:
+			case MXMD_UV2:
+			case MXMD_UV3:
+			{
+				msh->setMapSupport(currentMap, 1);
+				msh->setNumMapVerts(currentMap, numVerts);
+				msh->setNumMapFaces(currentMap, numFaces);
+				suff.AddChannel(currentMap);
 
-		for (int m = 0; m < numMeshes; m++)
+				for (int v = 0; v < numVerts; v++)
+				{
+					Vector2 temp;
+					d->Evaluate(v, &temp);
+					msh->Map(currentMap).tv[v] = { temp.X, 1.f - temp.Y, 0.f };
+				}
+
+				currentMap++;
+				break;
+			}
+			case MXMD_NORMAL:
+			case MXMD_NORMAL2:
+			case MXMD_NORMAL32:
+			{
+				suff.UseNormals();
+				MeshNormalSpec *normalSpec;
+				msh->SpecifyNormals();
+				normalSpec = msh->GetSpecifiedNormals();
+				normalSpec->ClearNormals();
+				normalSpec->SetNumNormals(numVerts);
+				normalSpec->SetNumFaces(numFaces);
+
+				for (int v = 0; v < numVerts; v++)
+				{
+					Point3 temp;
+					d->Evaluate(v, &temp);
+					normalSpec->Normal(v) = corMat.VectorTransform(temp);
+					normalSpec->SetNormalExplicit(v, true);
+				}
+
+				for (int f = 0; f < numFaces; f++)
+				{
+					MeshNormalFace &normalFace = normalSpec->Face(f);
+					const USVector &tmp = fBuff[f];
+					normalFace.SpecifyAll();
+					normalFace.SetNormalID(0, tmp.X);
+					normalFace.SetNormalID(1, tmp.Y);
+					normalFace.SetNormalID(2, tmp.Z);
+				}
+				break;
+			}
+			case MXMD_VERTEXCOLOR:
+			{
+				msh->setMapSupport(-2, 1);
+				msh->setNumMapVerts(-2, numVerts);
+				msh->setNumMapFaces(-2, numFaces);
+				msh->setMapSupport(0, 1);
+				msh->setNumMapVerts(0, numVerts);
+				msh->setNumMapFaces(0, numFaces);
+				suff.AddChannel(0);
+				suff.AddChannel(-2);
+
+				for (int v = 0; v < numVerts; v++)
+				{
+					Vector4 temp;
+					d->Evaluate(v, &temp);
+					msh->Map(0).tv[v] = reinterpret_cast<Point3 &>(temp);
+					msh->Map(-2).tv[v] = { temp.W, temp.W, temp.W };
+				}
+				break;
+			}
+			case MXMD_WEIGHTID:
+				skinDesc = d.get();
+				break;
+			default:
+				break;
+			}
+
+		MXMDMorphTargets::Ptr morphs = geom->GetVertexBufferMorphTargets(mObj->GetBufferID());
+
+		if (morphs)
 		{
-			MXMDMeshObject::Ptr mObj = group->GetMeshObject(m);
+			suff.UseMorph();
+			MXMDVertexBuffer::DescriptorCollection morphDescs = morphs->GetBaseMorph();
 
-			const int meshFacesID = mObj->GetUVFacesID();
-			MXMDFaceBuffer::Ptr fBuffer = geom->GetFaceBuffer(meshFacesID);
-			MXMDVertexBuffer::Ptr vBuffer = geom->GetVertexBuffer(mObj->GetBufferID());
-			const int numVerts = vBuffer->NumVertices();
-			const int numFaces = fBuffer->GetNumIndices() / 3;
-			TriObject *obj = CreateNewTriObject();
-			Mesh *msh = &obj->GetMesh();
-			msh->setNumVerts(numVerts);
-			msh->setNumFaces(numFaces);
-
-			const USVector *fBuff = fBuffer->GetBuffer();
-			MXMDVertexBuffer::DescriptorCollection descs = vBuffer->GetDescriptors();
-			INodeSuffixer suff;
-			int currentMap = 1;
-			MXMDVertexDescriptor *skinDesc = nullptr;
-
-			for (auto &d : descs)
+			for (auto &d : morphDescs)
 				switch (d->Type())
 				{
 				case MXMD_POSITION:
@@ -521,28 +653,8 @@ void XenoImp::LoadModels(MXMD *model)
 					}
 					break;
 				}
-				case MXMD_UV1:
-				case MXMD_UV2:
-				case MXMD_UV3:
-				{
-					msh->setMapSupport(currentMap, 1);
-					msh->setNumMapVerts(currentMap, numVerts);
-					msh->setNumMapFaces(currentMap, numFaces);
-					suff.AddChannel(currentMap);
 
-					for (int v = 0; v < numVerts; v++)
-					{
-						Vector2 temp;
-						d->Evaluate(v, &temp);
-						msh->Map(currentMap).tv[v] = { temp.X, 1.f - temp.Y, 0.f };
-					}
-
-					currentMap++;
-					break;
-				}
-				case MXMD_NORMAL:
-				case MXMD_NORMAL2:
-				case MXMD_NORMAL32:
+				case MXMD_NORMALMORPH:
 				{
 					suff.UseNormals();
 					MeshNormalSpec *normalSpec;
@@ -571,162 +683,98 @@ void XenoImp::LoadModels(MXMD *model)
 					}
 					break;
 				}
-				case MXMD_VERTEXCOLOR:
-				{
-					msh->setMapSupport(-2, 1);
-					msh->setNumMapVerts(-2, numVerts);
-					msh->setNumMapFaces(-2, numFaces);
-					msh->setMapSupport(0, 1);
-					msh->setNumMapVerts(0, numVerts);
-					msh->setNumMapFaces(0, numFaces);
-					suff.AddChannel(0);
-					suff.AddChannel(-2);
-
-					for (int v = 0; v < numVerts; v++)
-					{
-						Vector4 temp;
-						d->Evaluate(v, &temp);
-						msh->Map(0).tv[v] = reinterpret_cast<Point3 &>(temp);
-						msh->Map(-2).tv[v] = { temp.W, temp.W, temp.W };
-					}
-					break;
 				}
-				case MXMD_WEIGHTID:
-					skinDesc = d.get();
-					break;
-				default:
-					break;
-				}
-
-			MXMDMorphTargets::Ptr morphs = geom->GetVertexBufferMorphTargets(mObj->GetBufferID());
-
-			if (morphs)
-			{
-				suff.UseMorph();
-				MXMDVertexBuffer::DescriptorCollection morphDescs = morphs->GetBaseMorph();
-
-				for (auto &d : morphDescs)
-					switch (d->Type())
-					{
-					case MXMD_POSITION:
-					{
-						for (int v = 0; v < numVerts; v++)
-						{
-							Point3 temp;
-							d->Evaluate(v, &temp);
-							temp *= IDC_EDIT_SCALE_value;
-							msh->setVert(v, corMat.VectorTransform(temp));
-						}
-						break;
-					}
-
-					case MXMD_NORMALMORPH:
-					{
-						suff.UseNormals();
-						MeshNormalSpec *normalSpec;
-						msh->SpecifyNormals();
-						normalSpec = msh->GetSpecifiedNormals();
-						normalSpec->ClearNormals();
-						normalSpec->SetNumNormals(numVerts);
-						normalSpec->SetNumFaces(numFaces);
-
-						for (int v = 0; v < numVerts; v++)
-						{
-							Point3 temp;
-							d->Evaluate(v, &temp);
-							normalSpec->Normal(v) = corMat.VectorTransform(temp);
-							normalSpec->SetNormalExplicit(v, true);
-						}
-
-						for (int f = 0; f < numFaces; f++)
-						{
-							MeshNormalFace &normalFace = normalSpec->Face(f);
-							const USVector &tmp = fBuff[f];
-							normalFace.SpecifyAll();
-							normalFace.SetNormalID(0, tmp.X);
-							normalFace.SetNormalID(1, tmp.Y);
-							normalFace.SetNormalID(2, tmp.Z);
-						}
-						break;
-					}
-					}
-			}
-
-			for (int f = 0; f < numFaces; f++)
-			{
-				Face &face = msh->faces[f];
-				face.setEdgeVisFlags(1, 1, 1);
-				const USVector &tmp = fBuff[f];
-				face.v[0] = tmp.X;
-				face.v[1] = tmp.Y;
-				face.v[2] = tmp.Z;
-
-				for (int &i : suff)
-					msh->Map(i).tf[f].setTVerts(tmp.X, tmp.Y, tmp.Z);
-			}
-
-			msh->DeleteIsoVerts();
-			msh->DeleteIsoMapVerts();
-			msh->InvalidateGeomCache();
-			msh->InvalidateTopologyCache();
-
-			INode *nde = GetCOREInterface()->CreateObjectNode(obj);
-			int gibid = mObj->GetGibID();
-			TSTRING nodeName;
-
-			if (gibid)
-			{
-				nodeName.append(_T("Part"));
-				nodeName.append(ToTSTRING(gibid));
-			}
-			else
-			{
-				nodeName.append(_T("Object"));
-				nodeName.append(ToTSTRING(currentMesh));
-				currentMesh++;
-			}
-
-			int LOD = mObj->GetLODID();
-
-			if (LOD > 0)
-			{
-				MSTR curAssName = assName.c_str();
-				curAssName.append(ToTSTRING(currentAssembly).c_str());
-				curAssName.append(_T("_LOD")).append(ToTSTRING(LOD).c_str());
-
-				ILayer *currLODLayer = manager->GetLayer(curAssName);
-
-				if (!currLODLayer)
-					currLODLayer = manager->CreateLayer(curAssName);
-
-				currLODLayer->AddToLayer(nde);
-			}
-			else
-				currLayer->AddToLayer(nde);
-
-			suff.node = nde;
-
-			if (morphs)
-				ApplyMorph(morphs, nde, msh, mObj, mdl, geom);
-
-			if (skinDesc)
-				ApplySkin(geom, mObj, suff, msh->faces, skinDesc);
-
-			if (flags[IDC_CH_DEBUGNAME_checked])
-				nodeName.append(suff.Generate());
-
-			nde->SetName(ToBoneName(nodeName));
-
-			const int matID = mObj->GetMaterialID();
-
-			if (matID < outMats.size())
-				nde->SetMtl(outMats[matID]);
-
 		}
 
-		currentAssembly++;
+		for (int f = 0; f < numFaces; f++)
+		{
+			Face &face = msh->faces[f];
+			face.setEdgeVisFlags(1, 1, 1);
+			const USVector &tmp = fBuff[f];
+			face.v[0] = tmp.X;
+			face.v[1] = tmp.Y;
+			face.v[2] = tmp.Z;
+
+			for (int &i : suff)
+				msh->Map(i).tf[f].setTVerts(tmp.X, tmp.Y, tmp.Z);
+		}
+
+		msh->DeleteIsoVerts();
+		msh->DeleteIsoMapVerts();
+		msh->InvalidateGeomCache();
+		msh->InvalidateTopologyCache();
+
+		INode *nde = GetCOREInterface()->CreateObjectNode(obj);
+		int gibid = mObj->GetGibID();
+		TSTRING nodeName;
+
+		if (gibid)
+		{
+			nodeName.append(_T("Part"));
+			nodeName.append(ToTSTRING(gibid));
+		}
+		else
+		{
+			nodeName.append(_T("Object"));
+			nodeName.append(ToTSTRING(currentMesh));
+			currentMesh++;
+		}
+
+		int LOD = mObj->GetLODID();
+
+		if (LOD > 0)
+		{
+			MSTR curAssName = assName.c_str();
+			curAssName.append(ToTSTRING(curGroup).c_str());
+			curAssName.append(_T("_LOD")).append(ToTSTRING(LOD).c_str());
+
+			ILayer *currLODLayer = manager->GetLayer(curAssName);
+
+			if (!currLODLayer)
+				currLODLayer = manager->CreateLayer(curAssName);
+
+			currLODLayer->AddToLayer(nde);
+		}
+		else
+			currLayer->AddToLayer(nde);
+
+		suff.node = nde;
+
+		if (morphs)
+			ApplyMorph(morphs, nde, msh, mObj, mdl, geom);
+
+		if (skinDesc)
+			ApplySkin(geom, mObj, suff, msh->faces, skinDesc);
+
+		if (flags[IDC_CH_DEBUGNAME_checked])
+			nodeName.append(suff.Generate());
+
+		nde->SetName(ToBoneName(nodeName));
+
+		const int matID = mObj->GetMaterialID();
+
+		if (matID < outMats.size())
+			nde->SetMtl(outMats[matID]);
+
+		outNodes.AppendNode(nde);
 	}
 
+	return outNodes;
+}
+
+void XenoImp::LoadModels(MXMD *model)
+{
+	MXMDModel::Ptr mdl = model->GetModel();
+
+	if (!mdl)
+		return;
+
+	LoadModelPose(mdl);
+
+	const int numMeshGroups = mdl->GetNumMeshGroups();
+
+	for (int g = 0; g < numMeshGroups; g++)
+		LoadMeshes(model, mdl, g);
 }
 
 void XenoImp::LoadModelPose(MXMDModel::Ptr &model)
@@ -940,6 +988,61 @@ void XenoImp::ApplyMorph(MXMDMorphTargets::Ptr &morphs, INode *node, Mesh *mesh,
 	}
 }
 
+int XenoImp::LoadInstances(MXMD *model)
+{
+	MXMDModel::Ptr mdl = model->GetModel();
+	MXMDInstances::Ptr insts = model->GetInstances();
+
+	if (!mdl || !insts)
+		return 1;
+
+	const int numInstances = insts->GetNumInstances();
+	const int numGroups = mdl->GetNumMeshGroups();
+	std::vector<INodeTab> instances(numGroups);
+
+	for (int i = 0; i < numInstances; i++)
+	{
+		const MXMDTransformMatrix *mtx = insts->GetTransform(i);
+
+		int groupBegin = insts->GetStartingGroup(i);
+		const int groupEnd = groupBegin + insts->GetNumGroups(i);
+
+		for (groupBegin; groupBegin < groupEnd; groupBegin++)
+		{
+			int meshGroupID = insts->GetMeshGroup(groupBegin);
+
+			if (meshGroupID > numGroups || meshGroupID < 0)
+				continue;
+
+			INodeTab meshes;
+
+			if (!instances[meshGroupID].Count())
+			{
+				meshes = LoadMeshes(model, mdl, meshGroupID);
+				instances[meshGroupID] = meshes;
+			}
+			else
+				GetCOREInterface()->CloneNodes(instances[meshGroupID], Point3(), false, NODE_INSTANCE, nullptr, &meshes);
+
+			for (int m = 0; m < meshes.Count(); m++)
+			{
+				INode *node = meshes[m];
+				Matrix3 nodeTM = {};
+				nodeTM.SetRow(0, reinterpret_cast<const Point3 &>(mtx->m[0]));
+				nodeTM.SetRow(1, reinterpret_cast<const Point3 &>(mtx->m[1]));
+				nodeTM.SetRow(2, reinterpret_cast<const Point3 &>(mtx->m[2]));
+				nodeTM.SetRow(3, reinterpret_cast<const Point3 &>(mtx->m[3]) * IDC_EDIT_SCALE_value);
+				Matrix3 nodeTM2 = corMat;
+				nodeTM2.Invert();
+				nodeTM2 *= nodeTM;
+				node->SetNodeTM(0, nodeTM2 * corMat);
+			}
+		}
+	}
+
+	return 0;
+}
+
 int XenoImp::LoadSKL(const TCHAR *filename, BOOL suppressPrompts, bool subLoad)
 {
 	BC sklFile;
@@ -1128,9 +1231,11 @@ int XenoImp::LoadMXMD(const TCHAR *filename, ImpInterface *importerInt, Interfac
 				textures->ExtractAllTextures(folderPath.c_str(), params);
 			});
 
-	LoadTextures(&mainModel);
+	int textureLocation = LoadTextures(&mainModel);
 	LoadMaterials(&mainModel);
-	LoadModels(&mainModel);
+
+	if (LoadInstances(&mainModel))
+		LoadModels(&mainModel);
 
 	if (texThread.joinable())
 		texThread.join();
@@ -1138,7 +1243,19 @@ int XenoImp::LoadMXMD(const TCHAR *filename, ImpInterface *importerInt, Interfac
 	for (auto &t : texmaps)
 	{
 		const TCHAR *texName = t->GetName();
-		TSTRING texFullPath = folderPath + texName;
+		TSTRING texFullPath;
+		
+		if (textureLocation)
+		{
+			texFullPath = fleInfo.GetPath();
+			texFullPath.pop_back();
+
+			TFileInfo tfle(texFullPath);
+
+			texFullPath = tfle.GetPath() + _T("textures/") + texName;
+		}
+		else
+			texFullPath = folderPath + texName;
 
 		if (DoesFileExist((texFullPath + _T(".png")).c_str(), false))
 			texFullPath.append(_T(".png"));

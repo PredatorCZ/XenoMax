@@ -24,8 +24,8 @@
 #include "MAXex/win/CFGMacros.h"
 #include <vector>
 
-#define XENOMAX_VERSION 1
-#define XENOMAX_VERSIONINT 100
+#define XENOMAX_VERSION 1.1
+#define XENOMAX_VERSIONINT 110
 
 class XenoImport
 {
