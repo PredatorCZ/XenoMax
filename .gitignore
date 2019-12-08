@@ -31,7 +31,9 @@
 *.out
 *.app
 *.vs/
-ObjDump/*
+build/*
 [bB]in/*
 *.aps
 *.bat
+project.h
+*.7z
